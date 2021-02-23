@@ -1,19 +1,16 @@
 package command;
 
+import lombok.extern.java.Log;
+import lombok.extern.slf4j.Slf4j;
 import tasks.Voting;
 import util.HostInfo;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.Socket;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
+@Slf4j
 public class Coordinator {
 
     private Map<HostInfo, Boolean> replies;
@@ -44,14 +41,32 @@ public class Coordinator {
     public void startTransaction() {
         if (hostInfoList.isEmpty()) throw new IllegalStateException("Can't start transaction without participants info");
 
-        vote();
+        try {
+            vote();
+        } catch(IllegalThreadStateException | IllegalStateException e) {
+            log.error(e.getMessage());
+        }
         //commit();
     }
 
     private void vote() {
+        List<Future<Boolean>> futures = new ArrayList<>();
 
         for (HostInfo info : hostInfoList) {
-            executorService.submit(new Voting(info));
+            futures.add(executorService.submit(new Voting(info)));
+        }
+
+        List<Boolean> result = new ArrayList<>();
+        for (Future<Boolean> future : futures) {
+            try {
+                result.add(future.get(1, TimeUnit.SECONDS));
+            } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                throw new IllegalThreadStateException(e.getMessage());
+            }
+        }
+
+        if (result.stream().anyMatch(r -> !r)) {
+            throw new IllegalStateException("Can't proceed");
         }
     }
 
