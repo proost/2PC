@@ -12,7 +12,7 @@ import java.util.concurrent.*;
 @Slf4j
 public class Coordinator {
 
-    private Participant participant;
+    private final Participant participant;
     private final int numOfParticipants;
 
     private final Semaphore sem;

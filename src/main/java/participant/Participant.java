@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -40,29 +41,39 @@ public class Participant implements Runnable {
             Lock lock = new ReentrantLock();
             lock.lock();
 
+            // voteNo(); -> Maybe, occur when locking resource fails
             voteYes();
 
             try {
-                completionStart.await();
+                final boolean isConnected = completionStart.await(10, TimeUnit.SECONDS);
 
-                if (state == CommitPhaseState.SUCCESS) {
-                    log.info("-----redo log-----");
+                if (isConnected) {
+                    if (state == CommitPhaseState.SUCCESS) {
+                        log.info("-----redo log-----");
 
-                    commit();
+                        commit();
+                    } else {
+                        log.info("-----undo log-----");
+
+                        rollback();
+                    }
+
+                    sendAck();
                 } else {
-                    log.info("-----undo log-----");
-
-                    rollback();
+                    throw new IllegalStateException("Coordinator response Timeout");
                 }
+            } catch (InterruptedException | IllegalStateException e) {
+                // Interrupted during commit phase or Timeout
+                rollback();
 
                 sendAck();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
 
             lock.unlock();
         } catch (InterruptedException e) {
-            voteNo();
+            Thread.currentThread().interrupt();
+
+            log.error("Interrupted during waiting vote phase");
         }
     }
 
