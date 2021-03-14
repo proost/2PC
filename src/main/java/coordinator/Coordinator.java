@@ -177,6 +177,7 @@ public class Coordinator {
     private void endTransaction(final boolean isAllParticipantsAcknowledge) {
         if (acks.stream().allMatch(v -> v) // Maybe some participants not acknowledge
             && isAllParticipantsAcknowledge // If some participants are timeout during commit phase
+            && acks.size() == numOfParticipants
         ) {
             log.info("End transaction");
         } else {
