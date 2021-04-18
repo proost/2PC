@@ -24,8 +24,8 @@ public class Coordinator {
     private final CountDownLatch completionStart;
     private final CountDownLatch completionEnd;
 
-    private volatile List<Boolean> votes;
-    private volatile List<Boolean> acks;
+    private List<Boolean> votes;
+    private List<Boolean> acks;
 
     public static void main(String[] args) {
         Coordinator coordinator = new Coordinator(3 );
