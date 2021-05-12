@@ -1,6 +1,8 @@
 package coordinator;
 
 import commons.CommitPhaseState;
+import commons.CommitRequestPhaseState;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import participant.Participant;
@@ -12,17 +14,20 @@ import java.util.concurrent.*;
 @Slf4j
 public class Coordinator {
 
+    @Getter private volatile CommitRequestPhaseState commitRequestPhaseState;
+    @Getter private volatile CommitPhaseState commitPhaseState;
+
     private final Participant participant;
     private final int numOfParticipants;
 
     private final Semaphore sem;
-    private final CountDownLatch timer;
     private final ExecutorService executors;
 
     private final CountDownLatch votingStart;
     private final CountDownLatch votingEnd;
-    private final CountDownLatch completionStart;
-    private final CountDownLatch completionEnd;
+    private final CountDownLatch operationStart;
+    private final CountDownLatch operationEnd;
+    private final CountDownLatch transactionWrapup;
 
     private List<Boolean> votes;
     private List<Boolean> acks;
@@ -41,16 +46,16 @@ public class Coordinator {
         // configure overall process
         this.sem = new Semaphore(1); // Only one transaction allowed
         this.executors = Executors.newFixedThreadPool(numOfParticipants);
-        this.timer = new CountDownLatch(numOfParticipants); // wait overall process or timeout overall process(= trasaction fail)
         this.votes = new ArrayList<>(); // vote commit or abort
         this.acks = new ArrayList<>(); // acknowledge children process after completion process end
 
         // configure participants process
         this.votingStart = new CountDownLatch(1);
         this.votingEnd = new CountDownLatch(this.numOfParticipants);
-        this.completionStart = new CountDownLatch(1);
-        this.completionEnd = new CountDownLatch(this.numOfParticipants);
-        this.participant = new Participant(this, votingStart, completionStart);
+        this.operationStart = new CountDownLatch(1);
+        this.operationEnd = new CountDownLatch(this.numOfParticipants);
+        this.transactionWrapup = new CountDownLatch(1);
+        this.participant = new Participant(this, votingStart, operationStart, transactionWrapup);
     }
 
     private void configLogging() {
@@ -68,31 +73,21 @@ public class Coordinator {
             throw new IllegalThreadStateException("Interrupted starting transaction");
         }
 
-        final boolean isAllParticipantsVote = startVotingPhase();
-        final boolean isAllParticipantsAcknowledge = startCompletionPhase(isAllParticipantsVote);
+        final boolean votingResult = startVotingPhase();
+        if (isAbleToOperate(votingResult)) {
+            commitRequestPhaseState = CommitRequestPhaseState.SUCCESS;
 
-        endTransaction(isAllParticipantsAcknowledge);
-
-        try {
-            final boolean isTimeout = !timer.await(5, TimeUnit.SECONDS);
-
-            logTimeout(isTimeout);
-        } catch (InterruptedException e) {
-            throw new IllegalThreadStateException("Interrupted finishing transaction");
+            startOperation();
         }
 
-        this.sem.release();
+        endTransaction();
 
-        this.executors.shutdown(); // Close thread pool
+        this.sem.release();
     }
 
     private void initParticipants() {
         for (int i=0; i<numOfParticipants; i++) {
-            executors.execute(() -> {
-                participant.run();
-
-                timer.countDown();
-            });
+            executors.execute(participant);
         }
     }
 
@@ -120,6 +115,12 @@ public class Coordinator {
         votingEnd.countDown();
     }
 
+    private boolean isAbleToOperate(final boolean votingResult) {
+        return votes.stream().allMatch(v -> v) // check all agreements is yes
+                && votingResult // If some participant is timeout, can't start commit phase
+                && votes.size() == numOfParticipants;
+    }
+
     /*
     Commit (or completion) phase
         Success
@@ -132,62 +133,29 @@ public class Coordinator {
             1. The coordinator sends a rollback message to all the participants.
             4. The coordinator undoes the transaction when all acknowledgements have been received.
      */
-    private boolean startCompletionPhase(final boolean isAllParticipantsVote) {
-        if (isAbleToCommit(isAllParticipantsVote)) {
-            log.info("Commit (or completion) phase - Success");
-
-            startCommit();
-        } else {
-            log.info("Commit (or completion) phase - Fail");
-
-            abortCommit();
-        }
+    private void startOperation() {
+        operationStart.countDown();
 
         try {
-            return completionEnd.await(3, TimeUnit.SECONDS);
+            operationEnd.await(3, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            throw new IllegalThreadStateException("Interrupted Completion phase");
+            commitPhaseState = CommitPhaseState.UNDO;
         }
-    }
-
-    private boolean isAbleToCommit(final boolean isAllParticipantsVote) {
-        return votes.stream().allMatch(v -> v) // check all agreements is yes
-                && isAllParticipantsVote // If some participant is timeout, can't start commit phase
-                && votes.size() == numOfParticipants;
-    }
-
-    private void startCommit() {
-        participant.setCommitPhaseState(CommitPhaseState.SUCCESS);
-
-        completionStart.countDown();
-    }
-
-    private void abortCommit() {
-        participant.setCommitPhaseState(CommitPhaseState.FAILURE);
-
-        completionStart.countDown();
     }
 
     public synchronized void acknowledge(final boolean ack) {
         acks.add(ack);
 
-        completionEnd.countDown();
+        operationEnd.countDown();
     }
 
-    private void endTransaction(final boolean isAllParticipantsAcknowledge) {
-        if (acks.stream().allMatch(v -> v) // Maybe some participants not acknowledge
-            && isAllParticipantsAcknowledge // If some participants are timeout during commit phase
-            && acks.size() == numOfParticipants
-        ) {
-            log.info("End transaction");
+    private void endTransaction() {
+        if (acks.stream().allMatch(v -> v)  && acks.size() == numOfParticipants) {
+            commitPhaseState = CommitPhaseState.COMMIT;
         } else {
-            log.error("Receiving acknowledgement fails");
+            commitPhaseState = CommitPhaseState.UNDO;
         }
-    }
 
-    private void logTimeout(final boolean isTimeout) {
-        if (isTimeout) {
-            log.error("Transaction timeout");
-        }
+        transactionWrapup.countDown();
     }
 }

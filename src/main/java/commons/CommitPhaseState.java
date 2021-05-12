@@ -1,6 +1,7 @@
 package commons;
 
 public enum CommitPhaseState {
-    SUCCESS,
-    FAILURE
+    READY,
+    COMMIT,
+    UNDO
 }

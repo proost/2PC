@@ -1,6 +1,7 @@
 package participant;
 
 import commons.CommitPhaseState;
+import commons.CommitRequestPhaseState;
 import coordinator.Coordinator;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
@@ -16,18 +17,16 @@ public class Participant implements Runnable {
 
     private final Coordinator coordinator;
     private final CountDownLatch votingStart;
-    private final CountDownLatch completionStart;
+    private final CountDownLatch operationStart;
+    private final CountDownLatch transactionWrapup;
 
-    private CommitPhaseState state;
-
-    public Participant(
-            final Coordinator coordinator,
-            final CountDownLatch votingStart,
-            final CountDownLatch completionStart
+    public Participant(final Coordinator coordinator, final CountDownLatch votingStart,
+                       final CountDownLatch operationStart, final CountDownLatch transactionWrapup
     ) {
         this.coordinator = coordinator;
         this.votingStart = votingStart;
-        this.completionStart = completionStart;
+        this.operationStart = operationStart;
+        this.transactionWrapup = transactionWrapup;
     }
 
     @Override
@@ -36,44 +35,47 @@ public class Participant implements Runnable {
 
         try {
             votingStart.await();
+        } catch (InterruptedException e) {
+            log.error("Interrupted during waiting vote phase");
 
-            // This lock means the resources that held during the transaction.
-            Lock lock = new ReentrantLock();
-            lock.lock();
+            Thread.currentThread().interrupt();
+        }
 
-            // voteNo(); -> Maybe, occur when locking resource fails
-            voteYes();
+        // This lock means the resources that held during the transaction.
+        Lock lock = new ReentrantLock();
+        lock.lock();
 
-            try {
-                final boolean isConnected = completionStart.await(10, TimeUnit.SECONDS);
+        // voteNo(); -> Maybe, occur when locking resource fails
+        voteYes();
 
-                if (isConnected) {
-                    if (state == CommitPhaseState.SUCCESS) {
-                        log.info("-----redo log-----");
+        try {
+            operationStart.await(5, TimeUnit.SECONDS);
 
-                        commit();
-                    } else {
-                        log.info("-----undo log-----");
+            if (coordinator.getCommitRequestPhaseState() == CommitRequestPhaseState.SUCCESS) {
+                operate();
 
-                        rollback();
-                    }
-
-                    sendAck();
-                } else {
-                    throw new IllegalStateException("Coordinator response Timeout");
-                }
-            } catch (InterruptedException | IllegalStateException e) {
-                // Interrupted during commit phase or Timeout
-                rollback();
-
-                sendAck();
+                sendAck(true);
+            } else {
+                sendAck(false);
             }
+        } catch (Exception e) {
+            // Interrupted by Timeout or operation failed
 
+            sendAck(false);
+        } finally {
             lock.unlock();
+        }
+
+        try {
+            transactionWrapup.await(10, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
 
-            log.error("Interrupted during waiting vote phase");
+        if (coordinator.getCommitPhaseState() == CommitPhaseState.COMMIT) {
+            commit();
+        } else {
+            rollback();
         }
     }
 
@@ -106,8 +108,8 @@ public class Participant implements Runnable {
             2. Each participant undoes the transaction using the undo log, and releases the resources and locks held during the transaction.
             3. Each participant sends an acknowledgement to the coordinator.
      */
-    public void setCommitPhaseState(final CommitPhaseState state) {
-        this.state = state;
+    private void operate() {
+        log.info("Do job");
     }
 
     private void commit() {
@@ -118,8 +120,8 @@ public class Participant implements Runnable {
         log.info("Rollback");
     }
 
-    private void sendAck() {
-        coordinator.acknowledge(true);
+    private void sendAck(boolean ack) {
+        coordinator.acknowledge(ack);
     }
 }
 
